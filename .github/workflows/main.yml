@@ -1,0 +1,61 @@
+name: Build and Inject Swiggy Bypass
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-inject:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Tools
+        run: |
+          brew install opus-tools
+          # Install insert_dylib or optool. using insert_dylib as it's simpler often
+          git clone https://github.com/Tyilo/insert_dylib
+          cd insert_dylib
+          xcodebuild
+          sudo cp build/Release/insert_dylib /usr/local/bin/
+          
+      - name: Compile Dylib
+        run: |
+          clang -dynamiclib -framework Foundation -framework UIKit -framework AdSupport \
+            -o SwiggyBypass.dylib SwiggyBypass.m \
+            -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path)
+
+      - name: Prepare IPA
+        run: |
+          # Rename for easier handling if needed, but managing spaces is fine
+          unzip -q "Swiggy_ Food Instamart Dineout_v7.0.5-AppAssassin.ipa" -d extracted
+          
+      - name: Inject Dylib
+        run: |
+          # Copy dylib to the app bundle
+          APP_PATH=$(find extracted/Payload -name "*.app" -maxdepth 1)
+          cp SwiggyBypass.dylib "$APP_PATH/"
+          
+          # Inject load command
+          BINARY_NAME=$(defaults read "$APP_PATH/Info.plist" cfBundleExecutable)
+          insert_dylib --all-yes @executable_path/SwiggyBypass.dylib "$APP_PATH/$BINARY_NAME"
+          
+          # Codesign (Ad-hoc to allow injection, user will sign with their own certs or install tools)
+          # Usually side-loading handles signing, but we need to sign the dylib at least.
+          codesign -f -s - "$APP_PATH/SwiggyBypass.dylib"
+          codesign -f -s - "$APP_PATH"
+
+      - name: Repackage IPA
+        run: |
+          cd extracted
+          zip -qr ../Swiggy_Bypassed.ipa Payload
+          cd ..
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Swiggy_Bypassed.ipa
+          path: Swiggy_Bypassed.ipa
