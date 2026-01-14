@@ -59,109 +59,137 @@ static void EnsureIDsExist() {
 }
 
 - (NSUUID *)swizzled_identifierForVendor {
-    EnsureIDsExist();
+    // EnsureIDsExist(); // Call this here to be safe
     NSString *uuidString = [[NSUserDefaults standardUserDefaults] stringForKey:kSpoofedIDFV];
+    if (!uuidString) {
+        RotateIDs(); 
+        uuidString = [[NSUserDefaults standardUserDefaults] stringForKey:kSpoofedIDFV];
+    }
     return [[NSUUID alloc] initWithUUIDString:uuidString];
 }
 
 @end
 
-// Note: ASIdentifierManager is needed from AdSupport framework. 
-// We verify its class exists before hooking to avoid crashes if framework is missing (unlikely in Swiggy).
-// But for safety, we'll use runtime lookup.
+// --- UI / Interaction ---
 
-// --- UI Button ---
-
-@interface FloatingButtonController : NSObject
+@interface SwiggyBypassController : NSObject
 @end
 
-@implementation FloatingButtonController
+@implementation SwiggyBypassController
 
 + (instancetype)sharedInstance {
-    static FloatingButtonController *sharedInstance = nil;
+    static SwiggyBypassController *sharedInstance = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        sharedInstance = [[FloatingButtonController alloc] init];
+        sharedInstance = [[SwiggyBypassController alloc] init];
     });
     return sharedInstance;
 }
 
-- (void)showSuccessAlert {
+- (void)presentAlert:(NSString *)title message:(NSString *)message {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = [UIApplication sharedApplication].keyWindow;
+        UIWindow *window = [self findActiveWindow];
+        if (!window) return;
+
         UIViewController *topController = window.rootViewController;
         while (topController.presentedViewController) {
             topController = topController.presentedViewController;
         }
         
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Bypass Active"
-                                                                       message:@"Swiggy Bypass Loaded!\nIDs have been spoofed."
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                       message:message
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         [topController presentViewController:alert animated:YES completion:nil];
     });
 }
 
-- (void)rotateTapped {
-    RotateIDs();
-    
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Success"
-                                                                   message:@"New Device IDs Generated.\nPlease RESTART the app now."
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    
-    UIWindow *window = [UIApplication sharedApplication].keyWindow;
-    UIViewController *topController = window.rootViewController;
-    while (topController.presentedViewController) {
-        topController = topController.presentedViewController;
+- (UIWindow *)findActiveWindow {
+    // Try Modern Scenes (iOS 13+)
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
+            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                if (window.isKeyWindow) return window;
+            }
+        }
     }
-    [topController presentViewController:alert animated:YES completion:nil];
+    
+    // Fallback
+    return [UIApplication sharedApplication].windows.firstObject;
 }
 
-@end
+- (void)rotateTapped {
+    RotateIDs();
+    [self presentAlert:@"Success" message:@"New Device IDs Generated.\nPlease RESTART the app now."];
+}
 
-static UIButton *floatingButton = nil;
-
-static void SetupFloatingButton() {
-    if (floatingButton) return;
-    
-    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+- (void)setupFloatingButton {
+    UIWindow *window = [self findActiveWindow];
     if (!window) {
-        // Retry loop if window is not ready
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            SetupFloatingButton();
+            [self setupFloatingButton];
         });
         return;
     }
     
-    floatingButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    floatingButton.frame = CGRectMake(20, 150, 120, 50); // Slightly larger, lower down
-    floatingButton.backgroundColor = [UIColor orangeColor];
-    [floatingButton setTitle:@"ROTATE ID" forState:UIControlStateNormal];
-    [floatingButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    floatingButton.layer.cornerRadius = 25;
-    floatingButton.layer.borderWidth = 2;
-    floatingButton.layer.borderColor = [UIColor whiteColor].CGColor;
-    floatingButton.layer.zPosition = FLT_MAX; // Max zPosition
+    // Check if duplicate
+    for (UIView *subview in window.subviews) {
+        if (subview.tag == 9999) return;
+    }
+
+    // Larger, high contrast button
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    btn.frame = CGRectMake(20, 150, 140, 50);
+    btn.backgroundColor = [UIColor redColor];
+    [btn setTitle:@"ROTATE ID" forState:UIControlStateNormal];
+    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:18];
+    btn.layer.cornerRadius = 25;
+    btn.layer.borderColor = [UIColor whiteColor].CGColor;
+    btn.layer.borderWidth = 3;
+    btn.layer.zPosition = 9999;
+    btn.tag = 9999;
     
-    [floatingButton addTarget:[FloatingButtonController sharedInstance] 
-                       action:@selector(rotateTapped) 
-             forControlEvents:UIControlEventTouchUpInside];
+    [btn addTarget:self action:@selector(rotateTapped) forControlEvents:UIControlEventTouchUpInside];
     
-    [window addSubview:floatingButton];
-    [window bringSubviewToFront:floatingButton];
+    [window addSubview:btn];
+    [window bringSubviewToFront:btn];
     
-    // Show startup alert
-    [[FloatingButtonController sharedInstance] showSuccessAlert];
+    // Also present initial alert
+    [self presentAlert:@"Bypass Active" message:@"Shake device or Tap button to rotate ID."];
 }
+
+@end
+
+
+// --- Shake Gesture Hook ---
+
+@implementation UIWindow (ShakeListen)
+
+- (void)motionEnded:(UIEventSubtype)motion withEvent:(UIEvent *)event {
+    if (motion == UIEventSubtypeMotionShake) {
+        [[SwiggyBypassController sharedInstance] rotateTapped];
+    }
+    [super motionEnded:motion withEvent:event];
+}
+
+@end
+
+
+// --- Constructor ---
 
 __attribute__((constructor))
 static void initialize_hack() {
     EnsureIDsExist();
+    NSLog(@"[SwiggyBypass] Constructor Loaded");
+
+    // Start trying to show UI slightly delayed to let Scene load
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [[SwiggyBypassController sharedInstance] setupFloatingButton];
+    });
     
-    // Listen for app active to ensure UI is ready
+    // Also Observer
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {
-        SetupFloatingButton();
+         [[SwiggyBypassController sharedInstance] setupFloatingButton];
     }];
 }
