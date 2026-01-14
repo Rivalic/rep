@@ -40,7 +40,7 @@ jobs:
           cp SwiggyBypass.dylib "$APP_PATH/"
           
           # Inject load command
-          BINARY_NAME=$(defaults read "$APP_PATH/Info.plist" cfBundleExecutable)
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" "$APP_PATH/Info.plist")
           insert_dylib --all-yes @executable_path/SwiggyBypass.dylib "$APP_PATH/$BINARY_NAME"
           
           # Codesign (Ad-hoc to allow injection, user will sign with their own certs or install tools)
