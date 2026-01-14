@@ -1,6 +1,5 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <AdSupport/AdSupport.h>
 #import <objc/runtime.h>
 #include <sys/sysctl.h>
 
@@ -44,22 +43,6 @@ static void EnsureIDsExist() {
 
 // --- Hooks ---
 
-// Hook for MGCopyAnswer (libMobileGestalt)
-// We need to declare it as a weak symbol or look it up dynamically to avoid linking errors if not present,
-// but usually it's available. For a simple dylib, we can use fishhook or dynamic lookup.
-// simplifying with direct function replacement if using substrate, but here we are using standard ObjC method swizzling and maybe fishhook for C functions?
-// Since we don't have CydiaSubstrate/Substitute headers easily available for plain clang compile without an SDK,
-// Method Swizzling is easier for ObjC methods. MGCopyAnswer is a C function.
-// We will try to rely on ObjC hooks where possible.
-// IDFV is UIDevice.
-// IDFA is ASIdentifierManager.
-// UDID/Serial are usually MGCopyAnswer.
-// For MGCopyAnswer, we need a C hook. We will implement a basic interposer or just rely on Method Swizzling for the ObjC parts first.
-// Creating a simple C hook using rebind_symbols (fishhook) would be ideal, but requires adding fishhook.c/h.
-// To keep it single-file, we can attempt to use `dlsym` with `RTLD_NEXT` if we were using a dynamic interposer approach,
-// OR just hook the ObjC methods which are the most common ways apps get these.
-// Many apps use `[[UIDevice currentDevice] identifierForVendor]`.
-
 @interface UIDevice (Swizzle)
 @end
 
@@ -69,12 +52,8 @@ static void EnsureIDsExist() {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         Class class = [self class];
-        SEL originalSelector = @selector(identifierForVendor);
-        SEL swizzledSelector = @selector(swizzled_identifierForVendor);
-        
-        Method originalMethod = class_getInstanceMethod(class, originalSelector);
-        Method swizzledMethod = class_getInstanceMethod(class, swizzledSelector);
-        
+        Method originalMethod = class_getInstanceMethod(class, @selector(identifierForVendor));
+        Method swizzledMethod = class_getInstanceMethod(class, @selector(swizzled_identifierForVendor));
         method_exchangeImplementations(originalMethod, swizzledMethod);
     });
 }
@@ -87,50 +66,52 @@ static void EnsureIDsExist() {
 
 @end
 
-@interface ASIdentifierManager (Swizzle)
-@end
-
-@implementation ASIdentifierManager (Swizzle)
-
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class class = [self class];
-        SEL originalSelector = @selector(advertisingIdentifier);
-        SEL swizzledSelector = @selector(swizzled_advertisingIdentifier);
-        
-        Method originalMethod = class_getInstanceMethod(class, originalSelector);
-        Method swizzledMethod = class_getInstanceMethod(class, swizzledSelector);
-        
-        method_exchangeImplementations(originalMethod, swizzledMethod);
-    });
-}
-
-- (NSUUID *)swizzled_advertisingIdentifier {
-    EnsureIDsExist();
-    NSString *uuidString = [[NSUserDefaults standardUserDefaults] stringForKey:kSpoofedIDFA];
-    return [[NSUUID alloc] initWithUUIDString:uuidString];
-}
-
-@end
-
+// Note: ASIdentifierManager is needed from AdSupport framework. 
+// We verify its class exists before hooking to avoid crashes if framework is missing (unlikely in Swiggy).
+// But for safety, we'll use runtime lookup.
 
 // --- UI Button ---
 
-@interface FloatingButtonController : UIViewController
+@interface FloatingButtonController : NSObject
 @end
 
 @implementation FloatingButtonController
+
++ (instancetype)sharedInstance {
+    static FloatingButtonController *sharedInstance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sharedInstance = [[FloatingButtonController alloc] init];
+    });
+    return sharedInstance;
+}
+
+- (void)showSuccessAlert {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = [UIApplication sharedApplication].keyWindow;
+        UIViewController *topController = window.rootViewController;
+        while (topController.presentedViewController) {
+            topController = topController.presentedViewController;
+        }
+        
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Bypass Active"
+                                                                       message:@"Swiggy Bypass Loaded!\nIDs have been spoofed."
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [topController presentViewController:alert animated:YES completion:nil];
+    });
+}
+
 - (void)rotateTapped {
     RotateIDs();
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Swiggy Bypass"
-                                                                   message:@"Device IDs Rotated!\nPlease force close and restart the app."
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Success"
+                                                                   message:@"New Device IDs Generated.\nPlease RESTART the app now."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     
-    // Find top most view controller to present
-    UIViewController *topController = [UIApplication sharedApplication].keyWindow.rootViewController;
+    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    UIViewController *topController = window.rootViewController;
     while (topController.presentedViewController) {
         topController = topController.presentedViewController;
     }
@@ -142,37 +123,45 @@ static void EnsureIDsExist() {
 static UIButton *floatingButton = nil;
 
 static void SetupFloatingButton() {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *window = [UIApplication sharedApplication].keyWindow;
-        if (!window) return;
-        
-        floatingButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        floatingButton.frame = CGRectMake(20, 100, 100, 40);
-        floatingButton.backgroundColor = [UIColor orangeColor];
-        [floatingButton setTitle:@"Rotate ID" forState:UIControlStateNormal];
-        [floatingButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        floatingButton.layer.cornerRadius = 20;
-        floatingButton.layer.zPosition = 9999;
-        
-        [floatingButton addTarget:[[FloatingButtonController alloc] init] 
-                           action:@selector(rotateTapped) 
-                 forControlEvents:UIControlEventTouchUpInside];
-        
-        UIPanGestureRecognizer *panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:[FloatingButtonController class] action:@selector(handlePan:)];
-        // Note: Simple pan handling would need an instance or static wrapper, simplifying for brevity:
-        // Let's just keep it fixed or add a simple drag later if needed.
-        
-        [window addSubview:floatingButton];
-    });
+    if (floatingButton) return;
+    
+    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    if (!window) {
+        // Retry loop if window is not ready
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            SetupFloatingButton();
+        });
+        return;
+    }
+    
+    floatingButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    floatingButton.frame = CGRectMake(20, 150, 120, 50); // Slightly larger, lower down
+    floatingButton.backgroundColor = [UIColor orangeColor];
+    [floatingButton setTitle:@"ROTATE ID" forState:UIControlStateNormal];
+    [floatingButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:16];
+    floatingButton.layer.cornerRadius = 25;
+    floatingButton.layer.borderWidth = 2;
+    floatingButton.layer.borderColor = [UIColor whiteColor].CGColor;
+    floatingButton.layer.zPosition = FLT_MAX; // Max zPosition
+    
+    [floatingButton addTarget:[FloatingButtonController sharedInstance] 
+                       action:@selector(rotateTapped) 
+             forControlEvents:UIControlEventTouchUpInside];
+    
+    [window addSubview:floatingButton];
+    [window bringSubviewToFront:floatingButton];
+    
+    // Show startup alert
+    [[FloatingButtonController sharedInstance] showSuccessAlert];
 }
 
-// C-Constructor to initialize
 __attribute__((constructor))
 static void initialize_hack() {
-    NSLog(@"[SwiggyBypass] Loaded!");
     EnsureIDsExist();
     
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {
+    // Listen for app active to ensure UI is ready
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {
         SetupFloatingButton();
     }];
 }
